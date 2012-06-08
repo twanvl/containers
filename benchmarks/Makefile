@@ -9,8 +9,17 @@ run: $(patsubst %, %.csv, $(programs))
 bench-%: %.hs ../Data/%.hs
 	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
 
-bench-%.csv: bench-%
-	./bench-$* -u bench-$*.csv +RTS -K10M
+bench-%-Map: %-Map.hs ../Data/Map.hs
+	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
+
+bench-%-IntMap: %-IntMap.hs ../Data/IntMap.hs
+	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
+
+bench-%.csv bench-%.html: bench-%
+	./bench-$* -u bench-$*.csv -o bench-$*.html +RTS -K10M
+
+bench-MapIntInt: MapIntInt.hs ../Data/Map/Base.hs ../Data/Map/BaseIntInt.hs ../Data/IntMap/BaseInt.hs
+	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
 
 .PHONY: clean
 clean:
