@@ -1,13 +1,7 @@
-package := containers
-version := $(shell awk '/^version:/{print $$2}' ../$(package).cabal)
-lib := ../dist/build/libHS$(package)-$(version).a
+all:
 
-programs := bench-Map bench-Set bench-IntMap bench-IntSet bench-Sequence
-all: $(programs)
-run: $(patsubst %, %.csv, $(programs))
-
-bench-%: %.hs ../Data/%.hs
-	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
+bench-%: %.hs force
+	ghc -O2 -DTESTING $< -i../$(TOP) -o $@ -outputdir tmp -rtsopts
 
 bench-%-Map: %-Map.hs ../Data/Map.hs
 	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
@@ -15,13 +9,18 @@ bench-%-Map: %-Map.hs ../Data/Map.hs
 bench-%-IntMap: %-IntMap.hs ../Data/IntMap.hs
 	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
 
-bench-%.csv bench-%.html: bench-%
-	./bench-$* -u bench-$*.csv -o bench-$*.html +RTS -K10M
-
 bench-MapIntInt: MapIntInt.hs ../Data/Map/Base.hs ../Data/Map/BaseIntInt.hs ../Data/IntMap/BaseInt.hs
 	ghc -DTESTING -cpp -O2 -fregs-graph -rtsopts --make -fforce-recomp -i.. -o $@ $<
 
-.PHONY: clean
+
+bench-%.csv bench-%.html: bench-%
+	./bench-$* -v -u bench-$*.csv -o bench-$*.html
+
+.PHONY: force clean veryclean
+force:
+
 clean:
-	-find . \( -name '*.o' -o -name '*.hi' \) -exec rm {} \;
-	-rm -f $(programs)
+	rm -rf tmp $(patsubst %.hs, bench-%, $(wildcard *.hs))
+
+veryclean: clean
+	rm -rf *.csv

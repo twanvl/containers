@@ -53,6 +53,8 @@
 -- on strict maps, the resulting maps will be lazy.
 -----------------------------------------------------------------------------
 
+-- See the notes at the beginning of Data.IntMap.Base.
+
 module Data.IntMap.Strict (
             -- * Strictness properties
             -- $strictness
@@ -74,6 +76,10 @@ module Data.IntMap.Strict (
             , notMember
             , lookup
             , findWithDefault
+            , lookupLT
+            , lookupGT
+            , lookupLE
+            , lookupGE
 
             -- * Construction
             , empty
@@ -113,13 +119,20 @@ module Data.IntMap.Strict (
             , intersectionWith
             , intersectionWithKey
 
+            -- ** Universal combining function
+            , mergeWithKey
+
             -- * Traversal
             -- ** Map
             , map
             , mapWithKey
+            , traverseWithKey
             , mapAccum
             , mapAccumWithKey
             , mapAccumRWithKey
+            , mapKeys
+            , mapKeysWith
+            , mapKeysMonotonic
 
             -- * Folds
             , foldr
@@ -135,8 +148,9 @@ module Data.IntMap.Strict (
             -- * Conversion
             , elems
             , keys
-            , keysSet
             , assocs
+            , keysSet
+            , fromSet
 
             -- ** Lists
             , toList
@@ -146,6 +160,7 @@ module Data.IntMap.Strict (
 
             -- ** Ordered lists
             , toAscList
+            , toDescList
             , fromAscList
             , fromAscListWith
             , fromAscListWithKey
@@ -192,6 +207,7 @@ module Data.IntMap.Strict (
 
 import Prelude hiding (lookup,map,filter,foldr,foldl,null)
 
+import Data.Bits
 import Data.IntMap.Base hiding
     ( findWithDefault
     , singleton
@@ -212,6 +228,7 @@ import Data.IntMap.Base hiding
     , differenceWithKey
     , intersectionWith
     , intersectionWithKey
+    , mergeWithKey
     , updateMinWithKey
     , updateMaxWithKey
     , updateMax
@@ -221,10 +238,12 @@ import Data.IntMap.Base hiding
     , mapAccum
     , mapAccumWithKey
     , mapAccumRWithKey
+    , mapKeysWith
     , mapMaybe
     , mapMaybeWithKey
     , mapEither
     , mapEitherWithKey
+    , fromSet
     , fromList
     , fromListWith
     , fromListWithKey
@@ -233,6 +252,7 @@ import Data.IntMap.Base hiding
     , fromAscListWithKey
     , fromDistinctAscList
     )
+import qualified Data.IntSet.Base as IntSet
 import Data.StrictPair
 
 -- $strictness
@@ -265,11 +285,16 @@ import Data.StrictPair
 -- > findWithDefault 'x' 1 (fromList [(5,'a'), (3,'b')]) == 'x'
 -- > findWithDefault 'x' 5 (fromList [(5,'a'), (3,'b')]) == 'a'
 
+-- See IntMap.Base.Note: Local 'go' functions and capturing]
 findWithDefault :: a -> Key -> IntMap a -> a
-findWithDefault def k m
-  = def `seq` case lookup k m of
-      Nothing -> def
-      Just x  -> x
+findWithDefault def k = def `seq` k `seq` go
+  where
+    go (Bin p m l r) | nomatch k p m = def
+                     | zero k m  = go l
+                     | otherwise = go r
+    go (Tip kx x) | k == kx   = x
+                  | otherwise = def
+    go Nil = def
 
 {--------------------------------------------------------------------
   Construction
@@ -282,6 +307,7 @@ findWithDefault def k m
 singleton :: Key -> a -> IntMap a
 singleton k x
   = x `seq` Tip k x
+{-# INLINE singleton #-}
 
 {--------------------------------------------------------------------
   Insert
@@ -378,7 +404,6 @@ insertLookupWithKey f k x t = k `seq` x `seq`
 
 {--------------------------------------------------------------------
   Deletion
-  [delete] is the inlined version of [deleteWith (\k x -> Nothing)]
 --------------------------------------------------------------------}
 -- | /O(min(n,W))/. Adjust a value at a specific key. When the key is not
 -- a member of the map, the original map is returned.
@@ -515,24 +540,8 @@ unionWith f m1 m2
 -- > unionWithKey f (fromList [(5, "a"), (3, "b")]) (fromList [(5, "A"), (7, "C")]) == fromList [(3, "b"), (5, "5:a|A"), (7, "C")]
 
 unionWithKey :: (Key -> a -> a -> a) -> IntMap a -> IntMap a -> IntMap a
-unionWithKey f t1@(Bin p1 m1 l1 r1) t2@(Bin p2 m2 l2 r2)
-  | shorter m1 m2  = union1
-  | shorter m2 m1  = union2
-  | p1 == p2       = Bin p1 m1 (unionWithKey f l1 l2) (unionWithKey f r1 r2)
-  | otherwise      = join p1 t1 p2 t2
-  where
-    union1  | nomatch p2 p1 m1  = join p1 t1 p2 t2
-            | zero p2 m1        = Bin p1 m1 (unionWithKey f l1 t2) r1
-            | otherwise         = Bin p1 m1 l1 (unionWithKey f r1 t2)
-
-    union2  | nomatch p1 p2 m2  = join p1 t1 p2 t2
-            | zero p1 m2        = Bin p2 m2 (unionWithKey f t1 l2) r2
-            | otherwise         = Bin p2 m2 l2 (unionWithKey f t1 r2)
-
-unionWithKey f (Tip k x) t = insertWithKey f k x t
-unionWithKey f t (Tip k x) = insertWithKey (\k' x' y' -> f k' y' x') k x t  -- right bias
-unionWithKey _ Nil t  = t
-unionWithKey _ t Nil  = t
+unionWithKey f m1 m2
+  = mergeWithKey' Bin (\(Tip k1 x1) (Tip _k2 x2) -> Tip k1 $! f k1 x1 x2) id id m1 m2
 
 {--------------------------------------------------------------------
   Difference
@@ -558,31 +567,8 @@ differenceWith f m1 m2
 -- >     == singleton 3 "3:b|B"
 
 differenceWithKey :: (Key -> a -> b -> Maybe a) -> IntMap a -> IntMap b -> IntMap a
-differenceWithKey f t1@(Bin p1 m1 l1 r1) t2@(Bin p2 m2 l2 r2)
-  | shorter m1 m2  = difference1
-  | shorter m2 m1  = difference2
-  | p1 == p2       = bin p1 m1 (differenceWithKey f l1 l2) (differenceWithKey f r1 r2)
-  | otherwise      = t1
-  where
-    difference1 | nomatch p2 p1 m1  = t1
-                | zero p2 m1        = bin p1 m1 (differenceWithKey f l1 t2) r1
-                | otherwise         = bin p1 m1 l1 (differenceWithKey f r1 t2)
-
-    difference2 | nomatch p1 p2 m2  = t1
-                | zero p1 m2        = differenceWithKey f t1 l2
-                | otherwise         = differenceWithKey f t1 r2
-
-differenceWithKey f t1@(Tip k x) t2
-  = case lookup k t2 of
-      Just y  -> case f k x y of
-                   Just y' -> y' `seq` Tip k y'
-                   Nothing -> Nil
-      Nothing -> t1
-
-differenceWithKey _ Nil _       = Nil
-differenceWithKey f t (Tip k y) = updateWithKey (\k' x -> f k' x y) k t
-differenceWithKey _ t Nil       = t
-
+differenceWithKey f m1 m2
+  = mergeWithKey f id (const Nil) m1 m2
 
 {--------------------------------------------------------------------
   Intersection
@@ -602,31 +588,57 @@ intersectionWith f m1 m2
 -- > intersectionWithKey f (fromList [(5, "a"), (3, "b")]) (fromList [(5, "A"), (7, "C")]) == singleton 5 "5:a|A"
 
 intersectionWithKey :: (Key -> a -> b -> c) -> IntMap a -> IntMap b -> IntMap c
-intersectionWithKey f t1@(Bin p1 m1 l1 r1) t2@(Bin p2 m2 l2 r2)
-  | shorter m1 m2  = intersection1
-  | shorter m2 m1  = intersection2
-  | p1 == p2       = bin p1 m1 (intersectionWithKey f l1 l2) (intersectionWithKey f r1 r2)
-  | otherwise      = Nil
-  where
-    intersection1 | nomatch p2 p1 m1  = Nil
-                  | zero p2 m1        = intersectionWithKey f l1 t2
-                  | otherwise         = intersectionWithKey f r1 t2
+intersectionWithKey f m1 m2
+  = mergeWithKey' bin (\(Tip k1 x1) (Tip _k2 x2) -> Tip k1 $! f k1 x1 x2) (const Nil) (const Nil) m1 m2
 
-    intersection2 | nomatch p1 p2 m2  = Nil
-                  | zero p1 m2        = intersectionWithKey f t1 l2
-                  | otherwise         = intersectionWithKey f t1 r2
+{--------------------------------------------------------------------
+  MergeWithKey
+--------------------------------------------------------------------}
 
-intersectionWithKey f (Tip k x) t2
-  = case lookup k t2 of
-      Just y  -> Tip k $! f k x y
-      Nothing -> Nil
-intersectionWithKey f t1 (Tip k y)
-  = case lookup k t1 of
-      Just x  -> Tip k $! f k x y
-      Nothing -> Nil
-intersectionWithKey _ Nil _ = Nil
-intersectionWithKey _ _ Nil = Nil
+-- | /O(n+m)/. A high-performance universal combining function. Using
+-- 'mergeWithKey', all combining functions can be defined without any loss of
+-- efficiency (with exception of 'union', 'difference' and 'intersection',
+-- where sharing of some nodes is lost with 'mergeWithKey').
+--
+-- Please make sure you know what is going on when using 'mergeWithKey',
+-- otherwise you can be surprised by unexpected code growth or even
+-- corruption of the data structure.
+--
+-- When 'mergeWithKey' is given three arguments, it is inlined to the call
+-- site. You should therefore use 'mergeWithKey' only to define your custom
+-- combining functions. For example, you could define 'unionWithKey',
+-- 'differenceWithKey' and 'intersectionWithKey' as
+--
+-- > myUnionWithKey f m1 m2 = mergeWithKey (\k x1 x2 -> Just (f k x1 x2)) id id m1 m2
+-- > myDifferenceWithKey f m1 m2 = mergeWithKey f id (const empty) m1 m2
+-- > myIntersectionWithKey f m1 m2 = mergeWithKey (\k x1 x2 -> Just (f k x1 x2)) (const empty) (const empty) m1 m2
+--
+-- When calling @'mergeWithKey' combine only1 only2@, a function combining two
+-- 'IntMap's is created, such that
+--
+-- * if a key is present in both maps, it is passed with both corresponding
+--   values to the @combine@ function. Depending on the result, the key is either
+--   present in the result with specified value, or is left out;
+--
+-- * a nonempty subtree present only in the first map is passed to @only1@ and
+--   the output is added to the result;
+--
+-- * a nonempty subtree present only in the second map is passed to @only2@ and
+--   the output is added to the result.
+--
+-- The @only1@ and @only2@ methods /must return a map with a subset (possibly empty) of the keys of the given map/.
+-- The values can be modified arbitrarily.  Most common variants of @only1@ and
+-- @only2@ are 'id' and @'const' 'empty'@, but for example @'map' f@ or
+-- @'filterWithKey' f@ could be used for any @f@.
 
+mergeWithKey :: (Key -> a -> b -> Maybe c) -> (IntMap a -> IntMap c) -> (IntMap b -> IntMap c)
+             -> IntMap a -> IntMap b -> IntMap c
+mergeWithKey f g1 g2 = mergeWithKey' bin combine g1 g2
+  where -- We use the lambda form to avoid non-exhaustive pattern matches warning.
+        combine = \(Tip k1 x1) (Tip _k2 x2) -> case f k1 x1 x2 of Nothing -> Nil
+                                                                  Just x -> x `seq` Tip k1 x
+        {-# INLINE combine #-}
+{-# INLINE mergeWithKey #-}
 
 {--------------------------------------------------------------------
   Min\/Max
@@ -634,42 +646,50 @@ intersectionWithKey _ _ Nil = Nil
 
 -- | /O(log n)/. Update the value at the minimal key.
 --
--- > updateMinWithKey (\ k a -> (show k) ++ ":" ++ a) (fromList [(5,"a"), (3,"b")]) == fromList [(3,"3:b"), (5,"a")]
+-- > updateMinWithKey (\ k a -> Just ((show k) ++ ":" ++ a)) (fromList [(5,"a"), (3,"b")]) == fromList [(3,"3:b"), (5,"a")]
+-- > updateMinWithKey (\ _ _ -> Nothing)                     (fromList [(5,"a"), (3,"b")]) == singleton 5 "a"
 
-updateMinWithKey :: (Key -> a -> a) -> IntMap a -> IntMap a
+updateMinWithKey :: (Key -> a -> Maybe a) -> IntMap a -> IntMap a
 updateMinWithKey f t =
-  case t of Bin p m l r | m < 0 -> Bin p m l (go f r)
+  case t of Bin p m l r | m < 0 -> bin p m l (go f r)
             _ -> go f t
   where
-    go f' (Bin p m l r) = Bin p m (go f' l) r
-    go f' (Tip k y) = Tip k $! f' k y
+    go f' (Bin p m l r) = bin p m (go f' l) r
+    go f' (Tip k y) = case f' k y of
+                        Just y' -> y' `seq` Tip k y'
+                        Nothing -> Nil
     go _ Nil = error "updateMinWithKey Nil"
 
 -- | /O(log n)/. Update the value at the maximal key.
 --
--- > updateMaxWithKey (\ k a -> (show k) ++ ":" ++ a) (fromList [(5,"a"), (3,"b")]) == fromList [(3,"b"), (5,"5:a")]
+-- > updateMaxWithKey (\ k a -> Just ((show k) ++ ":" ++ a)) (fromList [(5,"a"), (3,"b")]) == fromList [(3,"b"), (5,"5:a")]
+-- > updateMaxWithKey (\ _ _ -> Nothing)                     (fromList [(5,"a"), (3,"b")]) == singleton 3 "b"
 
-updateMaxWithKey :: (Key -> a -> a) -> IntMap a -> IntMap a
+updateMaxWithKey :: (Key -> a -> Maybe a) -> IntMap a -> IntMap a
 updateMaxWithKey f t =
-  case t of Bin p m l r | m < 0 -> Bin p m (go f l) r
+  case t of Bin p m l r | m < 0 -> bin p m (go f l) r
             _ -> go f t
   where
-    go f' (Bin p m l r) = Bin p m l (go f' r)
-    go f' (Tip k y) = Tip k $! f' k y
+    go f' (Bin p m l r) = bin p m l (go f' r)
+    go f' (Tip k y) = case f' k y of
+                        Just y' -> y' `seq` Tip k y'
+                        Nothing -> Nil
     go _ Nil = error "updateMaxWithKey Nil"
 
 -- | /O(log n)/. Update the value at the maximal key.
 --
--- > updateMax (\ a -> "X" ++ a) (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "Xa")]
+-- > updateMax (\ a -> Just ("X" ++ a)) (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "Xa")]
+-- > updateMax (\ _ -> Nothing)         (fromList [(5,"a"), (3,"b")]) == singleton 3 "b"
 
-updateMax :: (a -> a) -> IntMap a -> IntMap a
+updateMax :: (a -> Maybe a) -> IntMap a -> IntMap a
 updateMax f = updateMaxWithKey (const f)
 
 -- | /O(log n)/. Update the value at the minimal key.
 --
--- > updateMin (\ a -> "X" ++ a) (fromList [(5,"a"), (3,"b")]) == fromList [(3, "Xb"), (5, "a")]
+-- > updateMin (\ a -> Just ("X" ++ a)) (fromList [(5,"a"), (3,"b")]) == fromList [(3, "Xb"), (5, "a")]
+-- > updateMin (\ _ -> Nothing)         (fromList [(5,"a"), (3,"b")]) == singleton 5 "a"
 
-updateMin :: (a -> a) -> IntMap a -> IntMap a
+updateMin :: (a -> Maybe a) -> IntMap a -> IntMap a
 updateMin f = updateMinWithKey (const f)
 
 
@@ -681,7 +701,11 @@ updateMin f = updateMinWithKey (const f)
 -- > map (++ "x") (fromList [(5,"a"), (3,"b")]) == fromList [(3, "bx"), (5, "ax")]
 
 map :: (a -> b) -> IntMap a -> IntMap b
-map f = mapWithKey (\_ x -> f x)
+map f t
+  = case t of
+      Bin p m l r -> Bin p m (map f l) (map f r)
+      Tip k x     -> Tip k $! f x
+      Nil         -> Nil
 
 -- | /O(n)/. Map a function over all values in the map.
 --
@@ -737,6 +761,19 @@ mapAccumRWithKey f a t
                      in (a2 `strictPair` Bin p m l' r')
       Tip k x     -> let (a',x') = f a k x in x' `seq` (a' `strictPair` Tip k x')
       Nil         -> (a `strictPair` Nil)
+
+-- | /O(n*log n)/.
+-- @'mapKeysWith' c f s@ is the map obtained by applying @f@ to each key of @s@.
+--
+-- The size of the result may be smaller if @f@ maps two or more distinct
+-- keys to the same new key.  In this case the associated values will be
+-- combined using @c@.
+--
+-- > mapKeysWith (++) (\ _ -> 1) (fromList [(1,"b"), (2,"a"), (3,"d"), (4,"c")]) == singleton 1 "cdab"
+-- > mapKeysWith (++) (\ _ -> 3) (fromList [(1,"b"), (2,"a"), (3,"d"), (4,"c")]) == singleton 3 "cdab"
+
+mapKeysWith :: (a -> a -> a) -> (Key->Key) -> IntMap a -> IntMap a
+mapKeysWith c f = fromListWith c . foldrWithKey (\k x xs -> (f k, x) : xs) []
 
 {--------------------------------------------------------------------
   Filter
@@ -795,6 +832,36 @@ mapEitherWithKey f (Tip k x) = case f k x of
   Right z -> z `seq` (Nil, Tip k z)
 mapEitherWithKey _ Nil = (Nil, Nil)
 
+{--------------------------------------------------------------------
+  Conversions
+--------------------------------------------------------------------}
+
+-- | /O(n)/. Build a map from a set of keys and a function which for each key
+-- computes its value.
+--
+-- > fromSet (\k -> replicate k 'a') (Data.IntSet.fromList [3, 5]) == fromList [(5,"aaaaa"), (3,"aaa")]
+-- > fromSet undefined Data.IntSet.empty == empty
+
+fromSet :: (Key -> a) -> IntSet.IntSet -> IntMap a
+fromSet _ IntSet.Nil = Nil
+fromSet f (IntSet.Bin p m l r) = Bin p m (fromSet f l) (fromSet f r)
+fromSet f (IntSet.Tip kx bm) = buildTree f kx bm (IntSet.suffixBitMask + 1)
+  where -- This is slightly complicated, as we to convert the dense
+        -- representation of IntSet into tree representation of IntMap.
+        --
+        -- We are given a nonzero bit mask 'bmask' of 'bits' bits with prefix 'prefix'.
+        -- We split bmask into halves corresponding to left and right subtree.
+        -- If they are both nonempty, we create a Bin node, otherwise exactly
+        -- one of them is nonempty and we construct the IntMap from that half.
+        buildTree g prefix bmask bits = prefix `seq` bmask `seq` case bits of
+          0 -> Tip prefix $! g prefix
+          _ -> case intFromNat ((natFromInt bits) `shiftRL` 1) of
+                 bits2 | bmask .&. ((1 `shiftLL` bits2) - 1) == 0 ->
+                           buildTree g (prefix + bits2) (bmask `shiftRL` bits2) bits2
+                       | (bmask `shiftRL` bits2) .&. ((1 `shiftLL` bits2) - 1) == 0 ->
+                           buildTree g prefix bmask bits2
+                       | otherwise ->
+                           Bin prefix bits2 (buildTree g prefix bmask bits2) (buildTree g (prefix + bits2) (bmask `shiftRL` bits2) bits2)
 
 {--------------------------------------------------------------------
   Lists

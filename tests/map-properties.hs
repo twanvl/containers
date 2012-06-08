@@ -8,9 +8,10 @@ import Data.Map.Lazy as Data.Map
 
 import Data.Monoid
 import Data.Maybe hiding (mapMaybe)
+import qualified Data.Maybe as Maybe (mapMaybe)
 import Data.Ord
 import Data.Function
-import Prelude hiding (lookup, null, map, filter)
+import Prelude hiding (lookup, null, map, filter, foldr, foldl)
 import qualified Prelude (map)
 
 import Data.List (nub,sort)
@@ -35,6 +36,10 @@ main = defaultMainWithOpts
          , testCase "notMember"  test_notMember
          , testCase "lookup"     test_lookup
          , testCase "findWithDefault"     test_findWithDefault
+         , testCase "lookupLT"   test_lookupLT
+         , testCase "lookupGT"   test_lookupGT
+         , testCase "lookupLE"   test_lookupLE
+         , testCase "lookupGE"   test_lookupGE
          , testCase "empty" test_empty
          , testCase "mempty" test_mempty
          , testCase "singleton" test_singleton
@@ -72,8 +77,9 @@ main = defaultMainWithOpts
          , testCase "mapKeysMonotonic" test_mapKeysMonotonic
          , testCase "elems" test_elems
          , testCase "keys" test_keys
+         , testCase "assocs" test_assocs
          , testCase "keysSet" test_keysSet
-         , testCase "associative" test_assocs
+         , testCase "fromSet" test_fromSet
          , testCase "toList" test_toList
          , testCase "fromList" test_fromList
          , testCase "fromListWith" test_fromListWith
@@ -123,7 +129,7 @@ main = defaultMainWithOpts
          , testProperty "fromList"             prop_fromList
          , testProperty "insert to singleton"  prop_singleton
          , testProperty "insert"               prop_insert
-         , testProperty "insert then lookup"   prop_lookup
+         , testProperty "insert then lookup"   prop_insertLookup
          , testProperty "insert then delete"   prop_insertDelete
          , testProperty "insert then delete2"  prop_insertDelete2
          , testProperty "delete non member"    prop_deleteNonMember
@@ -143,14 +149,27 @@ main = defaultMainWithOpts
          , testProperty "difference model"     prop_differenceModel
          , testProperty "intersection"         prop_intersection
          , testProperty "intersection model"   prop_intersectionModel
+         , testProperty "intersectionWith"     prop_intersectionWith
+         , testProperty "intersectionWithModel" prop_intersectionWithModel
+         , testProperty "intersectionWithKey"  prop_intersectionWithKey
+         , testProperty "intersectionWithKeyModel" prop_intersectionWithKeyModel
+         , testProperty "mergeWithKey model"   prop_mergeWithKeyModel
          , testProperty "fromAscList"          prop_ordered
          , testProperty "fromList then toList" prop_list
+         , testProperty "toDescList"           prop_descList
+         , testProperty "toAscList+toDescList" prop_ascDescList
          , testProperty "alter"                prop_alter
          , testProperty "index"                prop_index
          , testProperty "null"                 prop_null
          , testProperty "member"               prop_member
          , testProperty "notmember"            prop_notmember
+         , testProperty "lookup"               prop_lookup
+         , testProperty "find"                 prop_find
          , testProperty "findWithDefault"      prop_findWithDefault
+         , testProperty "lookupLT"             prop_lookupLT
+         , testProperty "lookupGT"             prop_lookupGT
+         , testProperty "lookupLE"             prop_lookupLE
+         , testProperty "lookupGE"             prop_lookupGE
          , testProperty "findIndex"            prop_findIndex
          , testProperty "lookupIndex"          prop_lookupIndex
          , testProperty "findMin"              prop_findMin
@@ -167,11 +186,12 @@ main = defaultMainWithOpts
          , testProperty "foldr'"               prop_foldr'
          , testProperty "foldl"                prop_foldl
          , testProperty "foldl'"               prop_foldl'
+         , testProperty "keysSet"              prop_keysSet
+         , testProperty "fromSet"              prop_fromSet
          ] opts
 
   where
-    opts = mempty { ropt_plain_output = Just True
-                  , ropt_test_options = Just $ mempty { topt_maximum_generated_tests = Just 500
+    opts = mempty { ropt_test_options = Just $ mempty { topt_maximum_generated_tests = Just 500
                                                       , topt_maximum_unsuitable_generated_tests = Just 500
                                                       }
                   }
@@ -262,6 +282,28 @@ test_findWithDefault :: Assertion
 test_findWithDefault = do
     findWithDefault 'x' 1 (fromList [(5,'a'), (3,'b')]) @?= 'x'
     findWithDefault 'x' 5 (fromList [(5,'a'), (3,'b')]) @?= 'a'
+
+test_lookupLT :: Assertion
+test_lookupLT = do
+    lookupLT 3 (fromList [(3,'a'), (5,'b')]) @?= Nothing
+    lookupLT 4 (fromList [(3,'a'), (5,'b')]) @?= Just (3, 'a')
+
+test_lookupGT :: Assertion
+test_lookupGT = do
+    lookupGT 4 (fromList [(3,'a'), (5,'b')]) @?= Just (5, 'b')
+    lookupGT 5 (fromList [(3,'a'), (5,'b')]) @?= Nothing
+
+test_lookupLE :: Assertion
+test_lookupLE = do
+    lookupLE 2 (fromList [(3,'a'), (5,'b')]) @?= Nothing
+    lookupLE 4 (fromList [(3,'a'), (5,'b')]) @?= Just (3, 'a')
+    lookupLE 5 (fromList [(3,'a'), (5,'b')]) @?= Just (5, 'b')
+
+test_lookupGE :: Assertion
+test_lookupGE = do
+    lookupGE 3 (fromList [(3,'a'), (5,'b')]) @?= Just (3, 'a')
+    lookupGE 4 (fromList [(3,'a'), (5,'b')]) @?= Just (5, 'b')
+    lookupGE 6 (fromList [(3,'a'), (5,'b')]) @?= Nothing
 
 ----------------------------------------------------------------
 -- Construction
@@ -468,6 +510,7 @@ test_mapKeysWith = do
 
 test_mapKeysMonotonic :: Assertion
 test_mapKeysMonotonic = do
+    mapKeysMonotonic (+ 1) (fromList [(5,"a"), (3,"b")])          @?= fromList [(4, "b"), (6, "a")]
     mapKeysMonotonic (\ k -> k * 2) (fromList [(5,"a"), (3,"b")]) @?= fromList [(6, "b"), (10, "a")]
     valid (mapKeysMonotonic (\ k -> k * 2) (fromList [(5,"a"), (3,"b")])) @?= True
     valid (mapKeysMonotonic (\ _ -> 1)     (fromList [(5,"a"), (3,"b")])) @?= False
@@ -485,15 +528,20 @@ test_keys = do
     keys (fromList [(5,"a"), (3,"b")]) @?= [3,5]
     keys (empty :: UMap) @?= []
 
+test_assocs :: Assertion
+test_assocs = do
+    assocs (fromList [(5,"a"), (3,"b")]) @?= [(3,"b"), (5,"a")]
+    assocs (empty :: UMap) @?= []
+
 test_keysSet :: Assertion
 test_keysSet = do
     keysSet (fromList [(5,"a"), (3,"b")]) @?= Data.Set.fromList [3,5]
     keysSet (empty :: UMap) @?= Data.Set.empty
 
-test_assocs :: Assertion
-test_assocs = do
-    assocs (fromList [(5,"a"), (3,"b")]) @?= [(3,"b"), (5,"a")]
-    assocs (empty :: UMap) @?= []
+test_fromSet :: Assertion
+test_fromSet = do
+   fromSet (\k -> replicate k 'a') (Data.Set.fromList [3, 5]) @?= fromList [(5,"aaaaa"), (3,"aaa")]
+   fromSet undefined Data.Set.empty @?= (empty :: IMap)
 
 ----------------------------------------------------------------
 -- Lists
@@ -792,8 +840,8 @@ prop_singleton k x = insert k x empty == singleton k x
 prop_insert :: Int -> UMap -> Bool
 prop_insert k t = valid $ insert k () t
 
-prop_lookup :: Int -> UMap -> Bool
-prop_lookup k t = lookup k (insert k () t) /= Nothing
+prop_insertLookup :: Int -> UMap -> Bool
+prop_insertLookup k t = lookup k (insert k () t) /= Nothing
 
 prop_insertDelete :: Int -> UMap -> Bool
 prop_insertDelete k t = valid $ delete k (insert k () t)
@@ -867,6 +915,63 @@ prop_intersectionModel xs ys
   = sort (keys (intersection (fromListWith (+) xs) (fromListWith (+) ys)))
     == sort (nub ((List.intersect) (Prelude.map fst xs) (Prelude.map fst ys)))
 
+prop_intersectionWith :: (Int -> Int -> Maybe Int) -> IMap -> IMap -> Bool
+prop_intersectionWith f t1 t2 = valid (intersectionWith f t1 t2)
+
+prop_intersectionWithModel :: [(Int,Int)] -> [(Int,Int)] -> Bool
+prop_intersectionWithModel xs ys
+  = toList (intersectionWith f (fromList xs') (fromList ys'))
+    == [(kx, f vx vy) | (kx, vx) <- List.sort xs', (ky, vy) <- ys', kx == ky]
+    where xs' = List.nubBy ((==) `on` fst) xs
+          ys' = List.nubBy ((==) `on` fst) ys
+          f l r = l + 2 * r
+
+prop_intersectionWithKey :: (Int -> Int -> Int -> Maybe Int) -> IMap -> IMap -> Bool
+prop_intersectionWithKey f t1 t2 = valid (intersectionWithKey f t1 t2)
+
+prop_intersectionWithKeyModel :: [(Int,Int)] -> [(Int,Int)] -> Bool
+prop_intersectionWithKeyModel xs ys
+  = toList (intersectionWithKey f (fromList xs') (fromList ys'))
+    == [(kx, f kx vx vy) | (kx, vx) <- List.sort xs', (ky, vy) <- ys', kx == ky]
+    where xs' = List.nubBy ((==) `on` fst) xs
+          ys' = List.nubBy ((==) `on` fst) ys
+          f k l r = k + 2 * l + 3 * r
+
+prop_mergeWithKeyModel :: [(Int,Int)] -> [(Int,Int)] -> Bool
+prop_mergeWithKeyModel xs ys
+  = and [ testMergeWithKey f keep_x keep_y
+        | f <- [ \_k x1  _x2 -> Just x1
+               , \_k _x1 x2  -> Just x2
+               , \_k _x1 _x2 -> Nothing
+               , \k  x1  x2  -> if k `mod` 2 == 0 then Nothing else Just (2 * x1 + 3 * x2)
+               ]
+        , keep_x <- [ True, False ]
+        , keep_y <- [ True, False ]
+        ]
+
+    where xs' = List.nubBy ((==) `on` fst) xs
+          ys' = List.nubBy ((==) `on` fst) ys
+
+          xm = fromList xs'
+          ym = fromList ys'
+
+          testMergeWithKey f keep_x keep_y
+            = toList (mergeWithKey f (keep keep_x) (keep keep_y) xm ym) == emulateMergeWithKey f keep_x keep_y
+              where keep False _ = empty
+                    keep True  m = m
+
+                    emulateMergeWithKey f keep_x keep_y
+                      = Maybe.mapMaybe combine (sort $ List.union (List.map fst xs') (List.map fst ys'))
+                        where combine k = case (List.lookup k xs', List.lookup k ys') of
+                                            (Nothing, Just y) -> if keep_y then Just (k, y) else Nothing
+                                            (Just x, Nothing) -> if keep_x then Just (k, x) else Nothing
+                                            (Just x, Just y) -> (\v -> (k, v)) `fmap` f k x y
+
+          -- We prevent inlining testMergeWithKey to disable the SpecConstr
+          -- optimalization. There are too many call patterns here so several
+          -- warnings are issued if testMergeWithKey gets inlined.
+          {-# NOINLINE testMergeWithKey #-}
+
 ----------------------------------------------------------------
 
 prop_ordered :: Property
@@ -877,6 +982,13 @@ prop_ordered
 
 prop_list :: [Int] -> Bool
 prop_list xs = (sort (nub xs) == [x | (x,()) <- toList (fromList [(x,()) | x <- xs])])
+
+prop_descList :: [Int] -> Bool
+prop_descList xs = (reverse (sort (nub xs)) == [x | (x,()) <- toDescList (fromList [(x,()) | x <- xs])])
+
+prop_ascDescList :: [Int] -> Bool
+prop_ascDescList xs = toAscList m == reverse (toDescList m)
+  where m = fromList $ zip xs $ repeat ()
 
 ----------------------------------------------------------------
 
@@ -898,23 +1010,61 @@ prop_index xs = length xs > 0 ==>
   in  xs == [ m ! i | i <- xs ]
 
 prop_null :: IMap -> Bool
-prop_null m = Data.Map.null m == (size m == 0)
+prop_null m = null m == (size m == 0)
 
 prop_member :: [Int] -> Int -> Bool
 prop_member xs n =
   let m  = fromList (zip xs xs)
-  in  (n `elem` xs) == (n `member` m)
+  in all (\k -> k `member` m == (k `elem` xs)) (n : xs)
 
 prop_notmember :: [Int] -> Int -> Bool
 prop_notmember xs n =
   let m  = fromList (zip xs xs)
-  in  (n `notElem` xs) == (n `notMember` m)
+  in all (\k -> k `notMember` m == (k `notElem` xs)) (n : xs)
 
-prop_findWithDefault :: [(Int, Int)] -> Property
-prop_findWithDefault ys = length ys > 0 ==>
-  let xs = List.nubBy ((==) `on` fst) ys
-      m  = fromList xs
-  in  and [ findWithDefault 0 i m == j | (i,j) <- xs ]
+prop_lookup :: [(Int, Int)] -> Int -> Bool
+prop_lookup xs n =
+  let xs' = List.nubBy ((==) `on` fst) xs
+      m = fromList xs'
+  in all (\k -> lookup k m == List.lookup k xs') (n : List.map fst xs')
+
+prop_find :: [(Int, Int)] -> Bool
+prop_find xs =
+  let xs' = List.nubBy ((==) `on` fst) xs
+      m = fromList xs'
+  in all (\(k, v) -> m ! k == v) xs'
+
+prop_findWithDefault :: [(Int, Int)] -> Int -> Int -> Bool
+prop_findWithDefault xs n x =
+  let xs' = List.nubBy ((==) `on` fst) xs
+      m = fromList xs'
+  in all (\k -> findWithDefault x k m == maybe x id (List.lookup k xs')) (n : List.map fst xs')
+
+test_lookupSomething :: (Int -> Map Int Int -> Maybe (Int, Int)) -> (Int -> Int -> Bool) -> [(Int, Int)] -> Bool
+test_lookupSomething lookup' cmp xs =
+  let odd_sorted_xs = filter_odd $ sort $ List.nubBy ((==) `on` fst) xs
+      t = fromList odd_sorted_xs
+      test k = case List.filter ((`cmp` k) . fst) odd_sorted_xs of
+                 []             -> lookup' k t == Nothing
+                 cs | 0 `cmp` 1 -> lookup' k t == Just (last cs) -- we want largest such element
+                    | otherwise -> lookup' k t == Just (head cs) -- we want smallest such element
+  in all test (List.map fst xs)
+
+  where filter_odd [] = []
+        filter_odd [_] = []
+        filter_odd (_ : o : xs) = o : filter_odd xs
+
+prop_lookupLT :: [(Int, Int)] -> Bool
+prop_lookupLT = test_lookupSomething lookupLT (<)
+
+prop_lookupGT :: [(Int, Int)] -> Bool
+prop_lookupGT = test_lookupSomething lookupGT (>)
+
+prop_lookupLE :: [(Int, Int)] -> Bool
+prop_lookupLE = test_lookupSomething lookupLE (<=)
+
+prop_lookupGE :: [(Int, Int)] -> Bool
+prop_lookupGE = test_lookupSomething lookupGE (>=)
 
 prop_findIndex :: [(Int, Int)] -> Property
 prop_findIndex ys = length ys > 0 ==>
@@ -954,19 +1104,19 @@ prop_filter :: (Int -> Bool) -> [(Int, Int)] -> Property
 prop_filter p ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.filter p m == fromList (List.filter (p . snd) xs)
+  in  filter p m == fromList (List.filter (p . snd) xs)
 
 prop_partition :: (Int -> Bool) -> [(Int, Int)] -> Property
 prop_partition p ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.partition p m == let (a,b) = (List.partition (p . snd) xs) in (fromList a, fromList b)
+  in  partition p m == let (a,b) = (List.partition (p . snd) xs) in (fromList a, fromList b)
 
 prop_map :: (Int -> Int) -> [(Int, Int)] -> Property
 prop_map f ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.map f m == fromList [ (a, f b) | (a,b) <- xs ]
+  in  map f m == fromList [ (a, f b) | (a,b) <- xs ]
 
 prop_fmap :: (Int -> Int) -> [(Int, Int)] -> Property
 prop_fmap f ys = length ys > 0 ==>
@@ -978,7 +1128,7 @@ prop_mapkeys :: (Int -> Int) -> [(Int, Int)] -> Property
 prop_mapkeys f ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.mapKeys f m == (fromList $ List.nubBy ((==) `on` fst) $ reverse [ (f a, b) | (a,b) <- sort xs])
+  in  mapKeys f m == (fromList $ List.nubBy ((==) `on` fst) $ reverse [ (f a, b) | (a,b) <- sort xs])
 
 prop_splitModel :: Int -> [(Int, Int)] -> Property
 prop_splitModel n ys = length ys > 0 ==>
@@ -991,22 +1141,48 @@ prop_foldr :: Int -> [(Int, Int)] -> Property
 prop_foldr n ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.foldrWithKey (\_ a b -> a + b) n m == List.foldr (+) n (List.map snd xs)
+  in  foldr (+) n m == List.foldr (+) n (List.map snd xs) &&
+      foldr (:) [] m == List.map snd (List.sort xs) &&
+      foldrWithKey (\_ a b -> a + b) n m == List.foldr (+) n (List.map snd xs) &&
+      foldrWithKey (\k _ b -> k + b) n m == List.foldr (+) n (List.map fst xs) &&
+      foldrWithKey (\k x xs -> (k,x):xs) [] m == List.sort xs
+
 
 prop_foldr' :: Int -> [(Int, Int)] -> Property
 prop_foldr' n ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.foldrWithKey' (\_ a b -> a + b) n m == List.foldr (+) n (List.map snd xs)
+  in  foldr' (+) n m == List.foldr (+) n (List.map snd xs) &&
+      foldr' (:) [] m == List.map snd (List.sort xs) &&
+      foldrWithKey' (\_ a b -> a + b) n m == List.foldr (+) n (List.map snd xs) &&
+      foldrWithKey' (\k _ b -> k + b) n m == List.foldr (+) n (List.map fst xs) &&
+      foldrWithKey' (\k x xs -> (k,x):xs) [] m == List.sort xs
 
 prop_foldl :: Int -> [(Int, Int)] -> Property
 prop_foldl n ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.foldlWithKey (\a _ b -> a + b) n m == List.foldr (+) n (List.map snd xs)
+  in  foldl (+) n m == List.foldr (+) n (List.map snd xs) &&
+      foldl (flip (:)) [] m == reverse (List.map snd (List.sort xs)) &&
+      foldlWithKey (\b _ a -> a + b) n m == List.foldr (+) n (List.map snd xs) &&
+      foldlWithKey (\b k _ -> k + b) n m == List.foldr (+) n (List.map fst xs) &&
+      foldlWithKey (\xs k x -> (k,x):xs) [] m == reverse (List.sort xs)
 
 prop_foldl' :: Int -> [(Int, Int)] -> Property
 prop_foldl' n ys = length ys > 0 ==>
   let xs = List.nubBy ((==) `on` fst) ys
       m  = fromList xs
-  in  Data.Map.foldlWithKey' (\a _ b -> a + b) n m == List.foldr (+) n (List.map snd xs)
+  in  foldl' (+) n m == List.foldr (+) n (List.map snd xs) &&
+      foldl' (flip (:)) [] m == reverse (List.map snd (List.sort xs)) &&
+      foldlWithKey' (\b _ a -> a + b) n m == List.foldr (+) n (List.map snd xs) &&
+      foldlWithKey' (\b k _ -> k + b) n m == List.foldr (+) n (List.map fst xs) &&
+      foldlWithKey' (\xs k x -> (k,x):xs) [] m == reverse (List.sort xs)
+
+prop_keysSet :: [(Int, Int)] -> Bool
+prop_keysSet xs =
+  keysSet (fromList xs) == Data.Set.fromList (List.map fst xs)
+
+prop_fromSet :: [(Int, Int)] -> Bool
+prop_fromSet ys =
+  let xs = List.nubBy ((==) `on` fst) ys
+  in fromSet (\k -> fromJust $ List.lookup k xs) (Data.Set.fromList $ List.map fst xs) == fromList xs

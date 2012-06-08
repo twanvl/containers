@@ -70,6 +70,10 @@ module Data.IntMap.Lazy (
             , notMember
             , IM.lookup
             , findWithDefault
+            , lookupLT
+            , lookupGT
+            , lookupLE
+            , lookupGE
 
             -- * Construction
             , empty
@@ -109,13 +113,20 @@ module Data.IntMap.Lazy (
             , intersectionWith
             , intersectionWithKey
 
+            -- ** Universal combining function
+            , mergeWithKey
+
             -- * Traversal
             -- ** Map
             , IM.map
             , mapWithKey
+            , traverseWithKey
             , mapAccum
             , mapAccumWithKey
             , mapAccumRWithKey
+            , mapKeys
+            , mapKeysWith
+            , mapKeysMonotonic
 
             -- * Folds
             , IM.foldr
@@ -131,8 +142,9 @@ module Data.IntMap.Lazy (
             -- * Conversion
             , elems
             , keys
-            , keysSet
             , assocs
+            , keysSet
+            , fromSet
 
             -- ** Lists
             , toList
@@ -142,6 +154,7 @@ module Data.IntMap.Lazy (
 
             -- ** Ordered lists
             , toAscList
+            , toDescList
             , fromAscList
             , fromAscListWith
             , fromAscListWithKey

@@ -4,13 +4,25 @@ import qualified Data.List as List
 import Data.Monoid (mempty)
 import Data.Set
 import Prelude hiding (lookup, null, map, filter, foldr, foldl)
-import Test.QuickCheck
 import Test.Framework
+import Test.Framework.Providers.HUnit
 import Test.Framework.Providers.QuickCheck2
+import Test.HUnit hiding (Test, Testable)
+import Test.QuickCheck
 
 main :: IO ()
-main = defaultMainWithOpts [ testProperty "prop_Valid" prop_Valid
+main = defaultMainWithOpts [ testCase "lookupLT" test_lookupLT
+                           , testCase "lookupGT" test_lookupGT
+                           , testCase "lookupLE" test_lookupLE
+                           , testCase "lookupGE" test_lookupGE
+                           , testProperty "prop_Valid" prop_Valid
                            , testProperty "prop_Single" prop_Single
+                           , testProperty "prop_Member" prop_Member
+                           , testProperty "prop_NotMember" prop_NotMember
+                           , testProperty "prop_LookupLT" prop_LookupLT
+                           , testProperty "prop_LookupGT" prop_LookupGT
+                           , testProperty "prop_LookupLE" prop_LookupLE
+                           , testProperty "prop_LookupGE" prop_LookupGE
                            , testProperty "prop_InsertValid" prop_InsertValid
                            , testProperty "prop_InsertDelete" prop_InsertDelete
                            , testProperty "prop_DeleteValid" prop_DeleteValid
@@ -26,6 +38,8 @@ main = defaultMainWithOpts [ testProperty "prop_Valid" prop_Valid
                            , testProperty "prop_Int" prop_Int
                            , testProperty "prop_Ordered" prop_Ordered
                            , testProperty "prop_List" prop_List
+                           , testProperty "prop_DescList" prop_DescList
+                           , testProperty "prop_AscDescList" prop_AscDescList
                            , testProperty "prop_fromList" prop_fromList
                            , testProperty "prop_isProperSubsetOf" prop_isProperSubsetOf
                            , testProperty "prop_isProperSubsetOf2" prop_isProperSubsetOf2
@@ -49,11 +63,36 @@ main = defaultMainWithOpts [ testProperty "prop_Valid" prop_Valid
                            , testProperty "prop_filter" prop_filter
                            ] opts
   where
-    opts = mempty { ropt_plain_output = Just True
-                  , ropt_test_options = Just $ mempty { topt_maximum_generated_tests = Just 500
+    opts = mempty { ropt_test_options = Just $ mempty { topt_maximum_generated_tests = Just 500
                                                       , topt_maximum_unsuitable_generated_tests = Just 500
                                                       }
                   }
+
+----------------------------------------------------------------
+-- Unit tests
+----------------------------------------------------------------
+
+test_lookupLT :: Assertion
+test_lookupLT = do
+    lookupLT 3 (fromList [3, 5]) @?= Nothing
+    lookupLT 5 (fromList [3, 5]) @?= Just 3
+
+test_lookupGT :: Assertion
+test_lookupGT = do
+   lookupGT 4 (fromList [3, 5]) @?= Just 5
+   lookupGT 5 (fromList [3, 5]) @?= Nothing
+
+test_lookupLE :: Assertion
+test_lookupLE = do
+   lookupLE 2 (fromList [3, 5]) @?= Nothing
+   lookupLE 4 (fromList [3, 5]) @?= Just 3
+   lookupLE 5 (fromList [3, 5]) @?= Just 5
+
+test_lookupGE :: Assertion
+test_lookupGE = do
+   lookupGE 3 (fromList [3, 5]) @?= Just 3
+   lookupGE 4 (fromList [3, 5]) @?= Just 5
+   lookupGE 6 (fromList [3, 5]) @?= Nothing
 
 {--------------------------------------------------------------------
   Arbitrary, reasonably balanced trees
@@ -97,10 +136,46 @@ prop_Valid :: Property
 prop_Valid = forValidUnitTree $ \t -> valid t
 
 {--------------------------------------------------------------------
-  Single, Insert, Delete
+  Single, Member, Insert, Delete
 --------------------------------------------------------------------}
 prop_Single :: Int -> Bool
 prop_Single x = (insert x empty == singleton x)
+
+prop_Member :: [Int] -> Int -> Bool
+prop_Member xs n =
+  let m  = fromList xs
+  in all (\k -> k `member` m == (k `elem` xs)) (n : xs)
+
+prop_NotMember :: [Int] -> Int -> Bool
+prop_NotMember xs n =
+  let m  = fromList xs
+  in all (\k -> k `notMember` m == (k `notElem` xs)) (n : xs)
+
+test_LookupSomething :: (Int -> Set Int -> Maybe Int) -> (Int -> Int -> Bool) -> [Int] -> Bool
+test_LookupSomething lookup' cmp xs =
+  let odd_sorted_xs = filter_odd $ nub $ sort xs
+      t = fromList odd_sorted_xs
+      test x = case List.filter (`cmp` x) odd_sorted_xs of
+                 []             -> lookup' x t == Nothing
+                 cs | 0 `cmp` 1 -> lookup' x t == Just (last cs) -- we want largest such element
+                    | otherwise -> lookup' x t == Just (head cs) -- we want smallest such element
+  in all test xs
+
+  where filter_odd [] = []
+        filter_odd [_] = []
+        filter_odd (_ : o : xs) = o : filter_odd xs
+
+prop_LookupLT :: [Int] -> Bool
+prop_LookupLT = test_LookupSomething lookupLT (<)
+
+prop_LookupGT :: [Int] -> Bool
+prop_LookupGT = test_LookupSomething lookupGT (>)
+
+prop_LookupLE :: [Int] -> Bool
+prop_LookupLE = test_LookupSomething lookupLE (<=)
+
+prop_LookupGE :: [Int] -> Bool
+prop_LookupGE = test_LookupSomething lookupGE (>=)
 
 prop_InsertValid :: Int -> Property
 prop_InsertValid k = forValidUnitTree $ \t -> valid (insert k t)
@@ -170,6 +245,13 @@ prop_Ordered = forAll (choose (5,100)) $ \n ->
 
 prop_List :: [Int] -> Bool
 prop_List xs = (sort (nub xs) == toList (fromList xs))
+
+prop_DescList :: [Int] -> Bool
+prop_DescList xs = (reverse (sort (nub xs)) == toDescList (fromList xs))
+
+prop_AscDescList :: [Int] -> Bool
+prop_AscDescList xs = toAscList s == reverse (toDescList s)
+  where s = fromList xs
 
 prop_fromList :: [Int] -> Bool
 prop_fromList xs

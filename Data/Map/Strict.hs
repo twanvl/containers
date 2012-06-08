@@ -49,20 +49,7 @@
 -- on strict maps, the resulting maps will be lazy.
 -----------------------------------------------------------------------------
 
--- It is crucial to the performance that the functions specialize on the Ord
--- type when possible. GHC 7.0 and higher does this by itself when it sees th
--- unfolding of a function -- that is why all public functions are marked
--- INLINABLE (that exposes the unfolding).
---
--- For other compilers and GHC pre 7.0, we mark some of the functions INLINE.
--- We mark the functions that just navigate down the tree (lookup, insert,
--- delete and similar). That navigation code gets inlined and thus specialized
--- when possible. There is a price to pay -- code growth. The code INLINED is
--- therefore only the tree navigation, all the real work (rebalancing) is not
--- INLINED by using a NOINLINE.
---
--- All methods that can be INLINE are not recursive -- a 'go' function doing
--- the real work is provided.
+-- See the notes at the beginning of Data.Map.Base.
 
 module Data.Map.Strict
     (
@@ -86,6 +73,10 @@ module Data.Map.Strict
     , notMember
     , lookup
     , findWithDefault
+    , lookupLT
+    , lookupGT
+    , lookupLE
+    , lookupGE
 
     -- * Construction
     , empty
@@ -125,10 +116,14 @@ module Data.Map.Strict
     , intersectionWith
     , intersectionWithKey
 
+    -- ** Universal combining function
+    , mergeWithKey
+
     -- * Traversal
     -- ** Map
     , map
     , mapWithKey
+    , traverseWithKey
     , mapAccum
     , mapAccumWithKey
     , mapAccumRWithKey
@@ -150,8 +145,9 @@ module Data.Map.Strict
     -- * Conversion
     , elems
     , keys
-    , keysSet
     , assocs
+    , keysSet
+    , fromSet
 
     -- ** Lists
     , toList
@@ -223,7 +219,6 @@ module Data.Map.Strict
     ) where
 
 import Prelude hiding (lookup,map,filter,foldr,foldl,null)
-import qualified Data.List as List
 
 import Data.Map.Base hiding
     ( findWithDefault
@@ -245,14 +240,14 @@ import Data.Map.Base hiding
     , differenceWithKey
     , intersectionWith
     , intersectionWithKey
+    , mergeWithKey
     , map
     , mapWithKey
     , mapAccum
     , mapAccumWithKey
     , mapAccumRWithKey
-    , mapKeys
     , mapKeysWith
-    , mapKeysMonotonic
+    , fromSet
     , fromList
     , fromListWith
     , fromListWithKey
@@ -270,6 +265,7 @@ import Data.Map.Base hiding
     , updateMinWithKey
     , updateMaxWithKey
     )
+import qualified Data.Set.Base as Set
 import Data.StrictPair
 
 -- Use macros to define strictness of functions.  STRICT_x_OF_y
@@ -312,10 +308,15 @@ import Data.StrictPair
 -- > findWithDefault 'x' 1 (fromList [(5,'a'), (3,'b')]) == 'x'
 -- > findWithDefault 'x' 5 (fromList [(5,'a'), (3,'b')]) == 'a'
 
+-- See Map.Base.Note: Local 'go' functions and capturing
 findWithDefault :: Ord k => a -> k -> Map k a -> a
-findWithDefault def k m = def `seq` case lookup k m of
-    Nothing -> def
-    Just x  -> x
+findWithDefault def k = def `seq` k `seq` go
+  where
+    go Tip = def
+    go (Bin _ kx x l r) = case compare k kx of
+      LT -> go l
+      GT -> go r
+      EQ -> x
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE findWithDefault #-}
 #else
@@ -347,9 +348,11 @@ singleton k x = x `seq` Bin 1 k x Tip Tip
 -- > insert 7 'x' (fromList [(5,'a'), (3,'b')]) == fromList [(3, 'b'), (5, 'a'), (7, 'x')]
 -- > insert 5 'x' empty                         == singleton 5 'x'
 
+-- See Map.Base.Note: Type of local 'go' function
 insert :: Ord k => k -> a -> Map k a -> Map k a
 insert = go
   where
+    go :: Ord k => k -> a -> Map k a -> Map k a
     STRICT_1_2_OF_3(go)
     go kx x Tip = singleton kx x
     go kx x (Bin sz ky y l r) =
@@ -393,9 +396,11 @@ insertWith f = insertWithKey (\_ x' y' -> f x' y')
 -- > insertWithKey f 7 "xxx" (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "a"), (7, "xxx")]
 -- > insertWithKey f 5 "xxx" empty                         == singleton 5 "xxx"
 
+-- See Map.Base.Note: Type of local 'go' function
 insertWithKey :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a -> Map k a
 insertWithKey = go
   where
+    go :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a -> Map k a
     STRICT_2_3_OF_4(go)
     go _ kx x Tip = singleton kx x
     go f kx x (Bin sy ky y l r) =
@@ -426,10 +431,12 @@ insertWithKey = go
 -- > insertLookup 5 "x" (fromList [(5,"a"), (3,"b")]) == (Just "a", fromList [(3, "b"), (5, "x")])
 -- > insertLookup 7 "x" (fromList [(5,"a"), (3,"b")]) == (Nothing,  fromList [(3, "b"), (5, "a"), (7, "x")])
 
+-- See Map.Base.Note: Type of local 'go' function
 insertLookupWithKey :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a
                     -> (Maybe a, Map k a)
 insertLookupWithKey = go
   where
+    go :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a -> (Maybe a, Map k a)
     STRICT_2_3_OF_4(go)
     go _ kx x Tip = Nothing `strictPair` singleton kx x
     go f kx x (Bin sy ky y l r) =
@@ -448,7 +455,6 @@ insertLookupWithKey = go
 
 {--------------------------------------------------------------------
   Deletion
-  [delete] is the inlined version of [deleteWith (\k x -> Nothing)]
 --------------------------------------------------------------------}
 
 -- | /O(log n)/. Update a value at a specific key with the result of the provided function.
@@ -510,9 +516,11 @@ update f = updateWithKey (\_ x -> f x)
 -- > updateWithKey f 7 (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "a")]
 -- > updateWithKey f 3 (fromList [(5,"a"), (3,"b")]) == singleton 5 "a"
 
+-- See Map.Base.Note: Type of local 'go' function
 updateWithKey :: Ord k => (k -> a -> Maybe a) -> k -> Map k a -> Map k a
 updateWithKey = go
   where
+    go :: Ord k => (k -> a -> Maybe a) -> k -> Map k a -> Map k a
     STRICT_2_OF_3(go)
     go _ _ Tip = Tip
     go f k(Bin sx kx x l r) =
@@ -537,9 +545,11 @@ updateWithKey = go
 -- > updateLookupWithKey f 7 (fromList [(5,"a"), (3,"b")]) == (Nothing,  fromList [(3, "b"), (5, "a")])
 -- > updateLookupWithKey f 3 (fromList [(5,"a"), (3,"b")]) == (Just "b", singleton 5 "a")
 
+-- See Map.Base.Note: Type of local 'go' function
 updateLookupWithKey :: Ord k => (k -> a -> Maybe a) -> k -> Map k a -> (Maybe a,Map k a)
 updateLookupWithKey = go
  where
+   go :: Ord k => (k -> a -> Maybe a) -> k -> Map k a -> (Maybe a,Map k a)
    STRICT_2_OF_3(go)
    go _ _ Tip = (Nothing,Tip)
    go f k (Bin sx kx x l r) =
@@ -569,9 +579,11 @@ updateLookupWithKey = go
 -- > alter f 7 (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "a"), (7, "c")]
 -- > alter f 5 (fromList [(5,"a"), (3,"b")]) == fromList [(3, "b"), (5, "c")]
 
+-- See Map.Base.Note: Type of local 'go' function
 alter :: Ord k => (Maybe a -> Maybe a) -> k -> Map k a -> Map k a
 alter = go
   where
+    go :: Ord k => (Maybe a -> Maybe a) -> k -> Map k a -> Map k a
     STRICT_2_OF_3(go)
     go f k Tip = case f Nothing of
                Nothing -> Tip
@@ -704,34 +716,9 @@ unionWith f m1 m2
 -- > unionWithKey f (fromList [(5, "a"), (3, "b")]) (fromList [(5, "A"), (7, "C")]) == fromList [(3, "b"), (5, "5:a|A"), (7, "C")]
 
 unionWithKey :: Ord k => (k -> a -> a -> a) -> Map k a -> Map k a -> Map k a
-unionWithKey _ Tip t2  = t2
-unionWithKey _ t1 Tip  = t1
-unionWithKey f t1 t2 = hedgeUnionWithKey f NothingS NothingS t1 t2
+unionWithKey f t1 t2 = mergeWithKey (\k x1 x2 -> Just $ f k x1 x2) id id t1 t2
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE unionWithKey #-}
-#endif
-
-hedgeUnionWithKey :: Ord a
-                  => (a -> b -> b -> b)
-                  -> MaybeS a -> MaybeS a
-                  -> Map a b -> Map a b
-                  -> Map a b
-hedgeUnionWithKey _ _     _     t1 Tip
-  = t1
-hedgeUnionWithKey _ blo bhi Tip (Bin _ kx x l r)
-  = join kx x (filterGt blo l) (filterLt bhi r)
-hedgeUnionWithKey f blo bhi (Bin _ kx x l r) t2
-  = newx `seq` join kx newx (hedgeUnionWithKey f blo bmi l lt)
-                            (hedgeUnionWithKey f bmi bhi r gt)
-  where
-    bmi        = JustS kx
-    lt         = trim blo bmi t2
-    (found,gt) = trimLookupLo kx bhi t2
-    newx       = case found of
-                   Nothing -> x
-                   Just (_,y) -> f kx x y
-#if __GLASGOW_HASKELL__ >= 700
-{-# INLINABLE hedgeUnionWithKey #-}
 #endif
 
 {--------------------------------------------------------------------
@@ -767,38 +754,11 @@ differenceWith f m1 m2
 -- >     == singleton 3 "3:b|B"
 
 differenceWithKey :: Ord k => (k -> a -> b -> Maybe a) -> Map k a -> Map k b -> Map k a
-differenceWithKey _ Tip _   = Tip
-differenceWithKey _ t1 Tip  = t1
-differenceWithKey f t1 t2   = hedgeDiffWithKey f NothingS NothingS t1 t2
+differenceWithKey f t1 t2 = mergeWithKey f id (const Tip) t1 t2
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE differenceWithKey #-}
 #endif
 
-hedgeDiffWithKey :: Ord a
-                 => (a -> b -> c -> Maybe b)
-                 -> MaybeS a -> MaybeS a
-                 -> Map a b -> Map a c
-                 -> Map a b
-hedgeDiffWithKey _ _     _     Tip _
-  = Tip
-hedgeDiffWithKey _ blo bhi (Bin _ kx x l r) Tip
-  = join kx x (filterGt blo l) (filterLt bhi r)
-hedgeDiffWithKey f blo bhi t (Bin _ kx x l r)
-  = case found of
-      Nothing -> merge tl tr
-      Just (ky,y) ->
-          case f ky y x of
-            Nothing -> merge tl tr
-            Just z  -> z `seq` join ky z tl tr
-  where
-    bmi        = JustS kx
-    lt         = trim blo bmi t
-    (found,gt) = trimLookupLo kx bhi t
-    tl         = hedgeDiffWithKey f blo bmi lt l
-    tr         = hedgeDiffWithKey f bmi bhi gt r
-#if __GLASGOW_HASKELL__ >= 700
-{-# INLINABLE hedgeDiffWithKey #-}
-#endif
 
 {--------------------------------------------------------------------
   Intersection
@@ -823,25 +783,75 @@ intersectionWith f m1 m2
 
 
 intersectionWithKey :: Ord k => (k -> a -> b -> c) -> Map k a -> Map k b -> Map k c
-intersectionWithKey _ Tip _ = Tip
-intersectionWithKey _ _ Tip = Tip
-intersectionWithKey f t1@(Bin s1 k1 x1 l1 r1) t2@(Bin s2 k2 x2 l2 r2) =
-   if s1 >= s2 then
-      let (lt,found,gt) = splitLookupWithKey k2 t1
-          tl            = intersectionWithKey f lt l2
-          tr            = intersectionWithKey f gt r2
-      in case found of
-      Just (k,x) -> join k (f k x x2) tl tr
-      Nothing -> merge tl tr
-   else let (lt,found,gt) = splitLookup k1 t2
-            tl            = intersectionWithKey f l1 lt
-            tr            = intersectionWithKey f r1 gt
-      in case found of
-      Just x -> let x' = f k1 x1 x in x' `seq` join k1 x' tl tr
-      Nothing -> merge tl tr
+intersectionWithKey f t1 t2 = mergeWithKey (\k x1 x2 -> Just $ f k x1 x2) (const Tip) (const Tip) t1 t2
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE intersectionWithKey #-}
 #endif
+
+
+{--------------------------------------------------------------------
+  MergeWithKey
+--------------------------------------------------------------------}
+
+-- | /O(n+m)/. A high-performance universal combining function. This function
+-- is used to define 'unionWith', 'unionWithKey', 'differenceWith',
+-- 'differenceWithKey', 'intersectionWith', 'intersectionWithKey' and can be
+-- used to define other custom combine functions.
+--
+-- Please make sure you know what is going on when using 'mergeWithKey',
+-- otherwise you can be surprised by unexpected code growth or even
+-- corruption of the data structure.
+--
+-- When 'mergeWithKey' is given three arguments, it is inlined to the call
+-- site. You should therefore use 'mergeWithKey' only to define your custom
+-- combining functions. For example, you could define 'unionWithKey',
+-- 'differenceWithKey' and 'intersectionWithKey' as
+--
+-- > myUnionWithKey f m1 m2 = mergeWithKey (\k x1 x2 -> Just (f k x1 x2)) id id m1 m2
+-- > myDifferenceWithKey f m1 m2 = mergeWithKey f id (const empty) m1 m2
+-- > myIntersectionWithKey f m1 m2 = mergeWithKey (\k x1 x2 -> Just (f k x1 x2)) (const empty) (const empty) m1 m2
+--
+-- When calling @'mergeWithKey' combine only1 only2@, a function combining two
+-- 'IntMap's is created, such that
+--
+-- * if a key is present in both maps, it is passed with both corresponding
+--   values to the @combine@ function. Depending on the result, the key is either
+--   present in the result with specified value, or is left out;
+--
+-- * a nonempty subtree present only in the first map is passed to @only1@ and
+--   the output is added to the result;
+--
+-- * a nonempty subtree present only in the second map is passed to @only2@ and
+--   the output is added to the result.
+--
+-- The @only1@ and @only2@ methods /must return a map with a subset (possibly empty) of the keys of the given map/.
+-- The values can be modified arbitrarily. Most common variants of @only1@ and
+-- @only2@ are 'id' and @'const' 'empty'@, but for example @'map' f@ or
+-- @'filterWithKey' f@ could be used for any @f@.
+
+mergeWithKey :: Ord k => (k -> a -> b -> Maybe c) -> (Map k a -> Map k c) -> (Map k b -> Map k c)
+             -> Map k a -> Map k b -> Map k c
+mergeWithKey f g1 g2 = go
+  where
+    go Tip t2 = g2 t2
+    go t1 Tip = g1 t1
+    go t1 t2 = hedgeMerge NothingS NothingS t1 t2
+
+    hedgeMerge _   _   t1  Tip = g1 t1
+    hedgeMerge blo bhi Tip (Bin _ kx x l r) = g2 $ join kx x (filterGt blo l) (filterLt bhi r)
+    hedgeMerge blo bhi (Bin _ kx x l r) t2 = let l' = hedgeMerge blo bmi l (trim blo bmi t2)
+                                                 (found, trim_t2) = trimLookupLo kx bhi t2
+                                                 r' = hedgeMerge bmi bhi r trim_t2
+                                             in case found of
+                                                  Nothing -> case g1 (singleton kx x) of
+                                                               Tip -> merge l' r'
+                                                               (Bin _ _ x' Tip Tip) -> join kx x' l' r'
+                                                               _ -> error "mergeWithKey: Given function only1 does not fulfil required conditions (see documentation)"
+                                                  Just x2 -> case f kx x x2 of
+                                                               Nothing -> merge l' r'
+                                                               Just x' -> x' `seq` join kx x' l' r'
+      where bmi = JustS kx
+{-# INLINE mergeWithKey #-}
 
 {--------------------------------------------------------------------
   Filter and partition
@@ -905,7 +915,8 @@ mapEitherWithKey f (Bin _ kx x l r) = case f kx x of
 -- > map (++ "x") (fromList [(5,"a"), (3,"b")]) == fromList [(3, "bx"), (5, "ax")]
 
 map :: (a -> b) -> Map k a -> Map k b
-map f = mapWithKey (\_ x -> f x)
+map _ Tip = Tip
+map f (Bin sx kx x l r) = let x' = f x in x' `seq` Bin sx kx x' (map f l) (map f r)
 
 -- | /O(n)/. Map a function over all values in the map.
 --
@@ -958,23 +969,6 @@ mapAccumRWithKey f a (Bin sx kx x l r) =
   in x' `seq` (a3,Bin sx kx x' l' r')
 
 -- | /O(n*log n)/.
--- @'mapKeys' f s@ is the map obtained by applying @f@ to each key of @s@.
---
--- The size of the result may be smaller if @f@ maps two or more distinct
--- keys to the same new key.  In this case the value at the greatest of
--- the original keys is retained.
---
--- > mapKeys (+ 1) (fromList [(5,"a"), (3,"b")])                        == fromList [(4, "b"), (6, "a")]
--- > mapKeys (\ _ -> 1) (fromList [(1,"b"), (2,"a"), (3,"d"), (4,"c")]) == singleton 1 "c"
--- > mapKeys (\ _ -> 3) (fromList [(1,"b"), (2,"a"), (3,"d"), (4,"c")]) == singleton 3 "c"
-
-mapKeys :: Ord k2 => (k1->k2) -> Map k1 a -> Map k2 a
-mapKeys = mapKeysWith (\x _ -> x)
-#if __GLASGOW_HASKELL__ >= 700
-{-# INLINABLE mapKeys #-}
-#endif
-
--- | /O(n*log n)/.
 -- @'mapKeysWith' c f s@ is the map obtained by applying @f@ to each key of @s@.
 --
 -- The size of the result may be smaller if @f@ maps two or more distinct
@@ -985,36 +979,24 @@ mapKeys = mapKeysWith (\x _ -> x)
 -- > mapKeysWith (++) (\ _ -> 3) (fromList [(1,"b"), (2,"a"), (3,"d"), (4,"c")]) == singleton 3 "cdab"
 
 mapKeysWith :: Ord k2 => (a -> a -> a) -> (k1->k2) -> Map k1 a -> Map k2 a
-mapKeysWith c f = fromListWith c . List.map fFirst . toList
-    where fFirst (x,y) = (f x, y)
+mapKeysWith c f = fromListWith c . foldrWithKey (\k x xs -> (f k, x) : xs) []
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE mapKeysWith #-}
 #endif
 
+{--------------------------------------------------------------------
+  Conversions
+--------------------------------------------------------------------}
 
--- | /O(n)/.
--- @'mapKeysMonotonic' f s == 'mapKeys' f s@, but works only when @f@
--- is strictly monotonic.
--- That is, for any values @x@ and @y@, if @x@ < @y@ then @f x@ < @f y@.
--- /The precondition is not checked./
--- Semi-formally, we have:
+-- | /O(n)/. Build a map from a set of keys and a function which for each key
+-- computes its value.
 --
--- > and [x < y ==> f x < f y | x <- ls, y <- ls]
--- >                     ==> mapKeysMonotonic f s == mapKeys f s
--- >     where ls = keys s
---
--- This means that @f@ maps distinct original keys to distinct resulting keys.
--- This function has better performance than 'mapKeys'.
---
--- > mapKeysMonotonic (\ k -> k * 2) (fromList [(5,"a"), (3,"b")]) == fromList [(6, "b"), (10, "a")]
--- > valid (mapKeysMonotonic (\ k -> k * 2) (fromList [(5,"a"), (3,"b")])) == True
--- > valid (mapKeysMonotonic (\ _ -> 1)     (fromList [(5,"a"), (3,"b")])) == False
+-- > fromSet (\k -> replicate k 'a') (Data.Set.fromList [3, 5]) == fromList [(5,"aaaaa"), (3,"aaa")]
+-- > fromSet undefined Data.Set.empty == empty
 
-mapKeysMonotonic :: (k1->k2) -> Map k1 a -> Map k2 a
-mapKeysMonotonic _ Tip = Tip
-mapKeysMonotonic f (Bin sz k x l r) =
-    let k' = f k
-    in k' `seq` Bin sz k' x (mapKeysMonotonic f l) (mapKeysMonotonic f r)
+fromSet :: (k -> a) -> Set.Set k -> Map k a
+fromSet _ Set.Tip = Tip
+fromSet f (Set.Bin sz x l r) = case f x of v -> v `seq` Bin sz x v (fromSet f l) (fromSet f r)
 
 {--------------------------------------------------------------------
   Lists

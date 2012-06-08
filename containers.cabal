@@ -13,7 +13,18 @@ description:
     valid even if structures are shared.
 build-type: Simple
 cabal-version:  >=1.8
-extra-source-files: include/Typeable.h
+extra-source-files:
+    include/Typeable.h
+    tests/Makefile
+    tests/*.hs
+    benchmarks/Makefile
+    benchmarks/bench-cmp.pl
+    benchmarks/bench-cmp.sh
+    benchmarks/*.hs
+    benchmarks/SetOperations/Makefile
+    benchmarks/SetOperations/*.hs
+    benchmarks/LookupGE/Makefile
+    benchmarks/LookupGE/*.hs
 
 source-repository head
     type:     git
@@ -42,7 +53,9 @@ Library
             Data.Tree
     other-modules:
         Data.IntMap.Base
+        Data.IntSet.Base
         Data.Map.Base
+        Data.Set.Base
         Data.StrictPair
 
     include-dirs: include
@@ -107,8 +120,10 @@ Test-suite set-properties
     extensions: MagicHash, DeriveDataTypeable, StandaloneDeriving, Rank2Types
 
     build-depends:
+        HUnit,
         QuickCheck,
         test-framework,
+        test-framework-hunit,
         test-framework-quickcheck2
 
 Test-suite intmap-lazy-properties
@@ -156,8 +171,10 @@ Test-suite intset-properties
     extensions: MagicHash, DeriveDataTypeable, StandaloneDeriving, Rank2Types
 
     build-depends:
+        HUnit,
         QuickCheck,
         test-framework,
+        test-framework-hunit,
         test-framework-quickcheck2
 
 Test-suite seq-properties

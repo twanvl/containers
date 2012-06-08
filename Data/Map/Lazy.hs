@@ -66,6 +66,10 @@ module Data.Map.Lazy (
             , notMember
             , M.lookup
             , findWithDefault
+            , lookupLT
+            , lookupGT
+            , lookupLE
+            , lookupGE
 
             -- * Construction
             , empty
@@ -105,10 +109,14 @@ module Data.Map.Lazy (
             , intersectionWith
             , intersectionWithKey
 
+            -- ** Universal combining function
+            , mergeWithKey
+
             -- * Traversal
             -- ** Map
             , M.map
             , mapWithKey
+            , traverseWithKey
             , mapAccum
             , mapAccumWithKey
             , mapAccumRWithKey
@@ -130,8 +138,9 @@ module Data.Map.Lazy (
             -- * Conversion
             , elems
             , keys
-            , keysSet
             , assocs
+            , keysSet
+            , fromSet
 
             -- ** Lists
             , toList
